@@ -142,20 +142,32 @@ async def get_languages(request: RepoRequest):
 @app.post("/api/code_frequency")
 async def get_code_frequency(request: RepoRequest):
     owner, repo = parse_github_url(str(request.url))
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}/stats/code_frequency", headers=HEADERS)
-    if resp.status_code == 202:
-        raise HTTPException(status_code=202, detail="Generating statistics. Try again shortly.")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to fetch code frequency")
-    stats = resp.json()
-    if not stats:
-        return []
-    result = []
-    for week in stats:
-        dt = datetime.utcfromtimestamp(week[0]).strftime('%Y-%m-%d')
-        result.append({"Date": dt, "Code Additions": week[1], "Code Deletions": week[2]})
-    return result
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}/stats/code_frequency", headers=HEADERS)
+            
+            # Special handling for 202 (processing)
+            if resp.status_code == 202:
+                return {"message": "GitHub is generating the statistics. Please try again in a moment."}
+            
+            # Handle other errors gracefully
+            if resp.status_code != 200:
+                print(f"Error from GitHub API: {resp.status_code} - {resp.text}")
+                return []
+            
+            stats = resp.json()
+            if not stats:
+                return []
+                
+            result = []
+            for week in stats:
+                dt = datetime.utcfromtimestamp(week[0]).strftime('%Y-%m-%d')
+                result.append({"Date": dt, "Code Additions": week[1], "Code Deletions": week[2]})
+            return result
+            
+    except Exception as e:
+        print(f"Exception in code_frequency: {str(e)}")
+        return []  # Return empty list instead of raising exception
 
 # Utility: Fetch all PRs with pagination
 async def fetch_all_prs(owner: str, repo: str, state: str) -> List[Dict[str, Any]]:
@@ -181,12 +193,16 @@ async def fetch_all_prs(owner: str, repo: str, state: str) -> List[Dict[str, Any
 # Endpoint: Pull request counts
 @app.post("/api/pull_requests")
 async def get_pull_requests(request: RepoRequest):
-    owner, repo = parse_github_url(str(request.url))
-    open_prs = await fetch_all_prs(owner, repo, "open")
-    closed_prs = await fetch_all_prs(owner, repo, "closed")
-    merged = sum(1 for pr in closed_prs if pr.get("merged_at"))
-    closed_unmerged = len(closed_prs) - merged
-    return {"open": len(open_prs), "closed_unmerged": closed_unmerged, "merged": merged}
+    try:
+        owner, repo = parse_github_url(str(request.url))
+        open_prs = await fetch_all_prs(owner, repo, "open")
+        closed_prs = await fetch_all_prs(owner, repo, "closed")
+        merged = sum(1 for pr in closed_prs if pr.get("merged_at"))
+        closed_unmerged = len(closed_prs) - merged
+        return {"open": len(open_prs), "closed_unmerged": closed_unmerged, "merged": merged}
+    except Exception as e:
+        print(f"Exception in pull_requests: {str(e)}")
+        return {"open": 0, "closed_unmerged": 0, "merged": 0}
 
 # Endpoint: Contribution heatmap data
 @app.post("/api/contribution_heatmap")
