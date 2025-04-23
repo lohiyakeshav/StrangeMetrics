@@ -61,33 +61,81 @@ def parse_github_url(url: str) -> Tuple[str, str]:
         raise ValueError("Invalid GitHub URL")
     return parts[-2], parts[-1]
 
+# Add rate limit checking function
+async def check_rate_limit():
+    """Check current GitHub API rate limit status"""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(f"{GITHUB_API}/rate_limit", headers=HEADERS)
+        if resp.status_code == 200:
+            data = resp.json()
+            core_rate = data.get("resources", {}).get("core", {})
+            remaining = core_rate.get("remaining", 0)
+            reset_time = datetime.fromtimestamp(core_rate.get("reset", 0))
+            now = datetime.now()
+            minutes_to_reset = max(0, int((reset_time - now).total_seconds() / 60))
+            return {
+                "remaining": remaining,
+                "limit": core_rate.get("limit", 60),
+                "reset_time": reset_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "minutes_to_reset": minutes_to_reset
+            }
+        return {"error": "Could not fetch rate limit information"}
+
 # Endpoint: Validate repository existence and visibility
 @app.post("/api/validate_repo")
 async def validate_repo(request: RepoRequest):
-    owner, repo = parse_github_url(str(request.url))
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=HEADERS)
-    if resp.status_code == 200:
-        return {"valid": True}
-    if resp.status_code == 404:
-        return {"valid": False, "error": "Repository not found or private"}
-    raise HTTPException(status_code=500, detail=f"Unexpected status code: {resp.status_code}")
+    try:
+        owner, repo = parse_github_url(str(request.url))
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=HEADERS)
+            
+            if resp.status_code == 403 and "rate limit exceeded" in resp.text.lower():
+                # Get rate limit info to include in the error
+                rate_info = await check_rate_limit()
+                error_msg = f"GitHub API rate limit exceeded. "
+                if "minutes_to_reset" in rate_info:
+                    error_msg += f"Limits will reset in {rate_info['minutes_to_reset']} minutes."
+                return {"valid": False, "error": error_msg, "rate_limit_info": rate_info}
+                
+            if resp.status_code == 200:
+                return {"valid": True}
+            if resp.status_code == 404:
+                return {"valid": False, "error": "Repository not found or private"}
+                
+            return {"valid": False, "error": f"Unexpected status code: {resp.status_code}"}
+    except Exception as e:
+        print(f"Exception in validate_repo: {str(e)}")
+        return {"valid": False, "error": f"An unexpected error occurred: {str(e)}"}
 
 # Endpoint: Basic repository info
 @app.post("/api/repo")
 async def get_repo_data(request: RepoRequest):
-    owner, repo = parse_github_url(str(request.url))
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=HEADERS)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail="Invalid repo or API limit reached")
-    data = resp.json()
-    return {
-        "name": data.get("name"),
-        "stars": data.get("stargazers_count"),
-        "forks": data.get("forks_count"),
-        "watchers": data.get("watchers_count"),
-    }
+    try:
+        owner, repo = parse_github_url(str(request.url))
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=HEADERS)
+            
+            if resp.status_code == 403 and "rate limit exceeded" in resp.text.lower():
+                # Get rate limit info to include in the error
+                rate_info = await check_rate_limit()
+                error_msg = f"GitHub API rate limit exceeded. "
+                if "minutes_to_reset" in rate_info:
+                    error_msg += f"Limits will reset in {rate_info['minutes_to_reset']} minutes."
+                return {"error": error_msg, "rate_limit_info": rate_info}
+                
+            if resp.status_code != 200:
+                return {"error": "Invalid repo or API limit reached", "status_code": resp.status_code}
+                
+            data = resp.json()
+            return {
+                "name": data.get("name"),
+                "stars": data.get("stargazers_count"),
+                "forks": data.get("forks_count"),
+                "watchers": data.get("watchers_count"),
+            }
+    except Exception as e:
+        print(f"Exception in get_repo_data: {str(e)}")
+        return {"error": f"An unexpected error occurred: {str(e)}"}
 
 # Endpoint: Commit frequency grouping
 @app.post("/api/commits")
@@ -237,6 +285,12 @@ async def get_contribution_heatmap(request: RepoRequest):
             result.append({"date": day, "commits": counts.get(day, 0)})
             curr += timedelta(days=1)
     return result
+
+# Add a new rate limit info endpoint
+@app.get("/api/rate_limit")
+async def get_rate_limit():
+    """Get the current GitHub API rate limit status"""
+    return await check_rate_limit()
 
 # Entry point for uvicorn
 if __name__ == "__main__":
