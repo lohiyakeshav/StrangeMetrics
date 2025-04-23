@@ -292,6 +292,31 @@ async def get_rate_limit():
     """Get the current GitHub API rate limit status"""
     return await check_rate_limit()
 
+# ————————————————
+# Root route for Render health checks
+@app.get("/")
+async def root():
+    return {"message": "Service is up!"}
+
+# Optional: self-ping to avoid free-tier idle sleep
+@app.on_event("startup")
+async def schedule_keep_alive():
+    import asyncio, os, httpx
+
+    async def keep_awake():
+        # replace with your Render public URL, or set EXTERNAL_URL in env
+        url = os.getenv("EXTERNAL_URL", "https://strangemetrics.onrender.com/")
+        while True:
+            await asyncio.sleep(60 * 2)        # every 2 minutes
+            try:
+                await httpx.get(url, timeout=10)
+                print("✅ Self-ping successful")
+            except Exception as e:
+                print("⚠️ Keep-alive ping failed:", e)
+
+    # fire & forget
+    asyncio.create_task(keep_awake())
+
 # Entry point for uvicorn
 if __name__ == "__main__":
     import uvicorn
